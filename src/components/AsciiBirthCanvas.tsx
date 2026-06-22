@@ -1,15 +1,15 @@
 import { useEffect, useRef, forwardRef, useImperativeHandle } from 'react';
 import { STARRY_NIGHT_HEX, STARRY_NIGHT_COLS, STARRY_NIGHT_ROWS } from './starryNightData';
 
-const MOON_CHARS =
-  " `.-':_,^=;><+!rc*/z?sLTv)J7(|Fi{C}fI31tlu[neoZ5Yxjya]2ESwqkP6h9d4VpOGbUAKXHm8RD#$Bg0MNWQ%&@";
-const FIELD_CHARS = '  ..::--==++**##@@'.split('');
 
 // Precomputed noise lookup table for performance (256x256 values)
 const noiseLUT = new Float32Array(256 * 256);
 for (let i = 0; i < 256 * 256; i++) {
   noiseLUT[i] = Math.random();
 }
+
+const FIELD_CHARS = '  ..::--==++**##@@'.split('');
+const RING_CHARS = 'XIlueYkU15SHoSmZq9[]5dqa1xxi'.split('');
 
 // Bilinear-filtered value noise using LUT (zero Math.sin calls in inner loop)
 const sampleNoiseLUT = (x: number, y: number) => {
@@ -42,6 +42,35 @@ const noise2D = (x: number, y: number) => {
 const clamp = (value: number, min: number, max: number) =>
   Math.max(min, Math.min(max, value));
 
+// Precomputed RGB buffer for Starry Night hex data
+const STARRY_NIGHT_RGB = new Uint8Array(STARRY_NIGHT_COLS * STARRY_NIGHT_ROWS * 3);
+for (let i = 0; i < STARRY_NIGHT_COLS * STARRY_NIGHT_ROWS; i++) {
+  const colorIdx = i * 6;
+  STARRY_NIGHT_RGB[i * 3]     = parseInt(STARRY_NIGHT_HEX.substring(colorIdx, colorIdx + 2), 16);
+  STARRY_NIGHT_RGB[i * 3 + 1] = parseInt(STARRY_NIGHT_HEX.substring(colorIdx + 2, colorIdx + 4), 16);
+  STARRY_NIGHT_RGB[i * 3 + 2] = parseInt(STARRY_NIGHT_HEX.substring(colorIdx + 4, colorIdx + 6), 16);
+}
+
+const getStarryNightColor = (x: number, y: number, canvasWidth: number, canvasHeight: number) => {
+  const scaleX = STARRY_NIGHT_COLS / canvasWidth;
+  const scaleY = STARRY_NIGHT_ROWS / canvasHeight;
+  const coverScale = Math.min(scaleX, scaleY);
+
+  // Map canvas coordinate (x, y) to texture space using CSS cover mode
+  const texX = (x - canvasWidth / 2) * coverScale + STARRY_NIGHT_COLS / 2;
+  const texY = (y - canvasHeight / 2) * coverScale + STARRY_NIGHT_ROWS / 2;
+
+  const texCol = clamp(Math.floor(texX), 0, STARRY_NIGHT_COLS - 1);
+  const texRow = clamp(Math.floor(texY), 0, STARRY_NIGHT_ROWS - 1);
+
+  const pixelIdx = (texRow * STARRY_NIGHT_COLS + texCol) * 3;
+  const rVal = STARRY_NIGHT_RGB[pixelIdx];
+  const gVal = STARRY_NIGHT_RGB[pixelIdx + 1];
+  const bVal = STARRY_NIGHT_RGB[pixelIdx + 2];
+
+  return { rVal, gVal, bVal, texCol, texRow };
+};
+
 
 export interface AsciiBirthCanvasRef {
   start: () => void;
@@ -56,6 +85,8 @@ interface AsciiBirthCanvasProps {
     sphereX: number;
     sphereY: number;
     colorProgress: number;
+    shadeProgress: number;
+    blackHoleProgress: number;
   }>;
 }
 
@@ -101,7 +132,15 @@ const AsciiBirthCanvas = forwardRef<AsciiBirthCanvasRef, AsciiBirthCanvasProps>(
         ctx.setTransform(1, 0, 0, 1, 0, 0);
         ctx.scale(dpr, dpr);
 
-        cols = width < 768 ? 95 : 135;
+        // Adjust column count dynamically for performance and readable size
+        if (width < 480) {
+          cols = 55; // Small mobile
+        } else if (width < 768) {
+          cols = 75; // Tablet/Large mobile
+        } else {
+          cols = 135; // Desktop
+        }
+
         const cellW = width / cols;
         const cellH = cellW * 1.18;
         rows = Math.ceil(height / cellH);
@@ -111,17 +150,21 @@ const AsciiBirthCanvas = forwardRef<AsciiBirthCanvasRef, AsciiBirthCanvasProps>(
       };
 
       const renderSingleFrame = () => {
-        // Background color
-        ctx.fillStyle = '#000000';
-        ctx.fillRect(0, 0, width, height);
-
         const state = animStateRef.current;
         if (!state) return;
 
+        const bh = state.blackHoleProgress; // black hole progress (0 -> 1)
+
+        // Background color shifts from `#000000` to `#0A0A0A` based on `bh`
+        const bgR = Math.round(0 + 10 * bh);
+        const bgG = Math.round(0 + 10 * bh);
+        const bgB = Math.round(0 + 10 * bh);
+        ctx.fillStyle = `rgb(${bgR}, ${bgG}, ${bgB})`;
+        ctx.fillRect(0, 0, width, height);
+
         const bgProgress = state.bgProgress;
         const sphereProgress = state.sphereProgress;
-        const sphereScale = state.sphereScale;
-        const colorProgress = state.colorProgress;
+        const shadeProgress = state.shadeProgress;
 
         const cellW = width / cols;
         const cellH = cellW * 1.18;
@@ -134,29 +177,19 @@ const AsciiBirthCanvas = forwardRef<AsciiBirthCanvasRef, AsciiBirthCanvasProps>(
 
           for (let r = 0; r < rows; r++) {
             const rowY = r * cellH + cellH / 2;
-            const ny = rowY / height;
 
             for (let c = 0; c < cols; c++) {
               const x = c * cellW + cellW / 2;
-              const nx = x / width;
 
-              const tx = Math.floor(nx * STARRY_NIGHT_COLS);
-              const ty = Math.floor(ny * STARRY_NIGHT_ROWS);
-              const texCol = clamp(tx, 0, STARRY_NIGHT_COLS - 1);
-              const texRow = clamp(ty, 0, STARRY_NIGHT_ROWS - 1);
-
-              const colorIdx = (texRow * STARRY_NIGHT_COLS + texCol) * 6;
-              const rVal = parseInt(STARRY_NIGHT_HEX.substring(colorIdx, colorIdx + 2), 16);
-              const gVal = parseInt(STARRY_NIGHT_HEX.substring(colorIdx + 2, colorIdx + 4), 16);
-              const bVal = parseInt(STARRY_NIGHT_HEX.substring(colorIdx + 4, colorIdx + 6), 16);
-
+              const { rVal, gVal, bVal } = getStarryNightColor(x, rowY, width, height);
               const starryColor = `rgba(${rVal}, ${gVal}, ${bVal}`;
+
               let starryOpacity = 0.90;
               if (rVal > 190 && gVal > 170) {
                 starryOpacity = 0.90 + Math.sin(time * 2.5 + (rVal + c) * 0.3) * 0.10;
               }
 
-              const charSeed = noise2D(nx * 12, ny * 12);
+              const charSeed = noise2D((x / width) * 12, (rowY / height) * 12);
               const char = charSeed > 0.5 ? '1' : '0';
 
               ctx.fillStyle = `${starryColor}, ${starryOpacity})`;
@@ -170,31 +203,62 @@ const AsciiBirthCanvas = forwardRef<AsciiBirthCanvasRef, AsciiBirthCanvasProps>(
         const starY = state.sphereY * height;
 
         const baseRadius = Math.min(width, height) * (width < 768 ? 0.28 : 0.22);
-        const starRadius = baseRadius * sphereScale;
-        const radiusForCalc = Math.max(1.0, starRadius);
 
-        // Center footprint coordinates for the sphere formation in lower center
+        // Center footprint coordinates for the sphere formation (perfect center)
         const starCenterX = width * 0.5;
-        const starCenterY = height * 0.65;
+        const starCenterY = height * 0.5;
 
         ctx.font = `${cellH * 0.84}px "Fragment Mono", monospace`;
         ctx.textAlign = 'center';
         ctx.textBaseline = 'middle';
 
-        let lx = -1.0;
+        // Dynamic light vector: shifts/rotates on scroll to crawl shadow from left to right
+        let lx = 1.0 - 2.0 * shadeProgress; 
         let ly = 0.15;
-        let lz = -0.6;
+        let lz = -0.10; // Sets shadow boundary around localX = 0.10 (55% width from left) at start
         const lLen = Math.hypot(lx, ly, lz);
         lx /= lLen;
         ly /= lLen;
         lz /= lLen;
 
         const t = sphereProgress; // transition progress (0 -> 1)
-        const coordT = 1 - Math.pow(1 - t, 3); // spring-like fast initial collapse
-        const elasticFactor = Math.sin(t * Math.PI * 2) * Math.pow(1 - t, 1.5); // spring-like overshoot wiggles
+        
+        // Easing transition: Quad ease-in-out for extremely smooth transition
+        const coordT = t < 0.5 ? 2 * t * t : 1 - Math.pow(-2 * t + 2, 2) / 2;
+
+        // Shift center of rotation and black hole on scroll
+        const centerX = starCenterX + (starX - starCenterX) * coordT;
+        const centerY = starCenterY + (starY - starCenterY) * coordT;
+
+        // Slow rotation angle for the background sheet
+        const angle = -0.32 * coordT;
+        const cosA = Math.cos(angle);
+        const sinA = Math.sin(angle);
+
+        // Precompute column waves for efficiency
+        const colWaves = new Float32Array(cols);
+        for (let c = 0; c < cols; c++) {
+          colWaves[c] = Math.sin(c * 0.18 + time * 2.2) * 8.0;
+        }
+
+        // Black Hole Horizon Radius (sized to match reference sphere beautifully)
+        const bhRadius = baseRadius * 0.85;
+
+        // Two-pass rendering list for small ring characters (prevents layout CPU lockups)
+        interface RingCharToDraw {
+          char: string;
+          x: number;
+          y: number;
+          r: number;
+          g: number;
+          b: number;
+          opacity: number;
+        }
+        const ringCharsList: RingCharToDraw[] = [];
 
         for (let r = 0; r < rows; r++) {
           const rowY = r * cellH + cellH / 2;
+          const rowWave = Math.cos(r * 0.18 + time * 2.2) * 8.0;
           const laneNorm = rowY / height;
           const laneSpeed = 1.75;
 
@@ -202,196 +266,208 @@ const AsciiBirthCanvas = forwardRef<AsciiBirthCanvasRef, AsciiBirthCanvasProps>(
             const x = c * cellW + cellW / 2;
             const y = rowY;
 
-            const nx = x / width;
-            const ny = y / height;
+            // Original coordinates relative to screen center
+            const dx = x - starCenterX;
+            const dy = y - starCenterY;
 
-            // --- 1. DETERMINE STARRY NIGHT ELEMENT COLOR & OPACITY FOR THE CELL ---
-            const tx = Math.floor(nx * STARRY_NIGHT_COLS);
-            const ty = Math.floor(ny * STARRY_NIGHT_ROWS);
-            const texCol = clamp(tx, 0, STARRY_NIGHT_COLS - 1);
-            const texRow = clamp(ty, 0, STARRY_NIGHT_ROWS - 1);
+            const charSeed = noise2D((x / width) * 12, (rowY / height) * 12);
 
-            const colorIdx = (texRow * STARRY_NIGHT_COLS + texCol) * 6;
-            const rVal = parseInt(STARRY_NIGHT_HEX.substring(colorIdx, colorIdx + 2), 16);
-            const gVal = parseInt(STARRY_NIGHT_HEX.substring(colorIdx + 2, colorIdx + 4), 16);
-            const bVal = parseInt(STARRY_NIGHT_HEX.substring(colorIdx + 4, colorIdx + 6), 16);
+            // 1. If the black hole is forming and this cell falls inside the event horizon void, skip it (keep it black)
+            if (bh > 0.001) {
+              const dxCell = x - centerX;
+              const dyCell = y - centerY;
+              if (Math.hypot(dxCell, dyCell) < bhRadius * 0.92) {
+                continue;
+              }
+            }
 
-            const starryColor = `rgba(${rVal}, ${gVal}, ${bVal}`;
+            // 2. Render outside of black hole (collapsing primary grid + streaming background)
+
+            // --- Primary Grid (Starry Night / Sphere -> Spiraling Collapse to Ring) ---
+            const { rVal, gVal, bVal } = getStarryNightColor(x, y, width, height);
             let starryOpacity = 0.90;
-            // Add subtle twinkling to stars and crescent moon
             if (rVal > 190 && gVal > 170) {
               starryOpacity = 0.90 + Math.sin(time * 2.5 + (rVal + c) * 0.3) * 0.10;
             }
 
-            // --- 2. TRANSITION COORDINATES AND RENDER CELLS ---
-            const distToCenter = Math.hypot(x - starCenterX, y - starCenterY);
-            const isSphereCell = distToCenter < baseRadius;
+            // Original coordinates after slow rotation and scrambling
+            const rx = dx * cosA - dy * sinA;
+            const ry = dx * sinA + dy * cosA;
+            const baseX = centerX + rx;
+            const baseY = centerY + ry;
 
-            const dxCurrent = x - starX;
-            const dyCurrent = y - starY;
-            const distCurrent = Math.hypot(dxCurrent, dyCurrent);
-            const normDistCurrent = distCurrent / radiusForCalc;
+            // Wavy corners
+            const ndX = Math.abs(dx) / (width * 0.5);
+            const ndY = Math.abs(dy) / (height * 0.5);
+            const cornerFactor = 1.0 + 3.0 * (ndX * ndX + ndY * ndY);
 
-            if (isSphereCell) {
-              // --- CELL DOCKS INTO SPHERE ---
-              // Target coordinates in the moving, scaling sphere
-              const targetX = starX + (x - starCenterX) * sphereScale;
-              const targetY = starY + (y - starCenterY) * sphereScale;
+            const scrambleX = rowWave * coordT * cornerFactor;
+            const scrambleY = colWaves[c] * coordT * cornerFactor;
 
-              // Elastic Scrambling displacement
-              const scrambleX = Math.sin(r * 0.4 + time * 1.5) * (width * 0.16) * elasticFactor + Math.sin(time * 5.0 + r * 0.5) * 15 * elasticFactor;
-              const scrambleY = Math.cos(c * 0.4 + time * 1.2) * (height * 0.16) * elasticFactor + Math.cos(time * 4.0 + c * 0.5) * 15 * elasticFactor;
+            const drawX = baseX + scrambleX;
+            const drawY = baseY + scrambleY;
 
-              const drawX = (1 - coordT) * x + coordT * targetX + scrambleX;
-              const drawY = (1 - coordT) * y + coordT * targetY + scrambleY;
+            // Calculate position relative to black hole center for collapse logic
+            const dxBH = drawX - centerX;
+            const dyBH = drawY - centerY;
+            const distBH = Math.hypot(dxBH, dyBH);
+            const angleBH = Math.atan2(dyBH, dxBH);
 
-              const currentDx = drawX - starX;
-              const currentDy = drawY - starY;
+            // Calculate final primary coordinates and color
+            let drawPrimaryX = drawX;
+            let drawPrimaryY = drawY;
+            let primaryChar = charSeed > 0.5 ? '1' : '0';
+            let primaryOpacity = starryOpacity;
+            let primaryR = rVal;
+            let primaryG = gVal;
+            let primaryB = bVal;
 
-              let char = '';
-              let opacity = 0;
+            if (bh > 0.001) {
+              // Target radius: wavy ring shape with 5 concentric strands
+              const strandIdx = (c * 23 + r * 37) % 5;
+              const frequency = 3 + strandIdx * 1.2;
+              const speed = 2.0 - strandIdx * 0.3;
+              const amplitude = bhRadius * (0.04 + strandIdx * 0.012);
+              const phase = time * speed + strandIdx * (Math.PI / 2.5);
 
-              if (t < 0.8) {
-                // Starry Night phase (strictly binary 0s and 1s)
-                const charSeed = noise2D(nx * 12, ny * 12);
-                char = charSeed > 0.5 ? '1' : '0';
-                opacity = starryOpacity;
-                
-                const localX = currentDx / radiusForCalc;
-                if (localX < 0.10) {
-                  // Left 55% of width is orange tone
-                  ctx.fillStyle = `rgba(240, 110, 32, ${opacity})`;
-                } else {
-                  // Outer part is the Starry Night color
-                  ctx.fillStyle = `${starryColor}, ${opacity})`;
-                }
+              // Calculate the wavy target radius for this particle
+              const targetRadius = bhRadius * (0.95 + strandIdx * 0.04) + Math.sin(angleBH * frequency + phase) * amplitude;
+
+              // Add a small noise offset to make it look organic (fuzzy accretion disk)
+              const noiseOffset = (noise2D(c * 0.5, r * 0.5) - 0.5) * bhRadius * 0.03 * bh;
+              const finalTargetRadius = targetRadius + noiseOffset;
+
+              // Interpolate distance: original distance (distBH) -> wavy target radius (finalTargetRadius)
+              const drawDistance = distBH * (1 - bh) + finalTargetRadius * bh;
+
+              // Spiral rotation: rotate coordinates as they collapse into the vortex
+              const spiralSpeed = 6.0;
+              const spiralAngle = angleBH + bh * spiralSpeed * (1.0 - distBH / Math.max(width, height)) - time * 2.2 * bh;
+
+              // Chaotic scattering during transition (peaks at bh = 0.5, returns to 0 at bh = 1.0)
+              const scatterStrength = Math.sin(bh * Math.PI) * 45 * (1.0 + (c % 3) * 0.4);
+              const noiseValX = noise2D(c * 0.2 + time, r * 0.2);
+              const noiseValY = noise2D(c * 0.2, r * 0.2 + time);
+              const scatterX = (noiseValX - 0.5) * scatterStrength;
+              const scatterY = (noiseValY - 0.5) * scatterStrength;
+
+              drawPrimaryX = centerX + Math.cos(spiralAngle) * drawDistance + scatterX;
+              drawPrimaryY = centerY + Math.sin(spiralAngle) * drawDistance + scatterY;
+
+              // Skip rendering if the lensed coordinate ends up inside the void
+              const finalDistBH = Math.hypot(drawPrimaryX - centerX, drawPrimaryY - centerY);
+              if (finalDistBH < bhRadius * 0.92) {
+                primaryOpacity = 0;
+              }
+
+              // Density Control: Only 50% survive on the ring to make it clean but visible
+              const survivalSeed = noise2D(c * 7.7, r * 9.3);
+              const survivalThreshold = 1.0 - 0.50 * bh;
+              if (survivalSeed > survivalThreshold) {
+                primaryOpacity *= (1 - bh);
+              }
+
+              // Use ring characters for collapsing characters to make the accretion ring look authentic
+              const charIdx = Math.floor(noise2D(x * 0.5, y * 0.5) * RING_CHARS.length);
+              primaryChar = RING_CHARS[charIdx];
+
+              // Color transition to glowing orange near the event horizon
+              primaryR = Math.round(rVal + (255 - rVal) * bh);
+              primaryG = Math.round(gVal + (105 - gVal) * bh);
+              primaryB = Math.round(bVal + (0 - bVal) * bh);
+            }
+
+            const isRingChar = bh > 0.001;
+
+            if (primaryOpacity > 0.02) {
+              if (isRingChar) {
+                // Save ring characters to draw them in Pass 2 with a smaller font
+                ringCharsList.push({
+                  char: primaryChar,
+                  x: drawPrimaryX,
+                  y: drawPrimaryY,
+                  r: primaryR,
+                  g: primaryG,
+                  b: primaryB,
+                  opacity: primaryOpacity
+                });
               } else {
-                // Sphere formed phase (glowing shaded star)
-                const localX = currentDx / radiusForCalc;
-                const localY = -currentDy / radiusForCalc;
-                const localR2 = localX * localX + localY * localY;
-                const z = Math.sqrt(Math.max(0, 1.0 - localR2));
-
-                const angle = time * 0.25;
-                const px = localX * Math.cos(angle) - z * Math.sin(angle);
-                const py = localY;
-                const pz = localX * Math.sin(angle) + z * Math.cos(angle);
-
-                let diffuse = px * lx + py * ly + pz * lz;
-                diffuse = Math.max(0, diffuse);
-
-                const maria =
-                  noise2D(px * 2.6 + 4.2, py * 2.6 - 1.7) * 0.6 +
-                  noise2D(pz * 3.4 - 8.1, py * 3.4 + 5.4) * 0.4;
-                const craters =
-                  noise2D(px * 12.0 + py * 6.0 + 30.0, pz * 12.0 - px * 4.0 - 20.0) * 0.65 +
-                  noise2D(px * 20.0 - 11.0, py * 20.0 + 7.0) * 0.35;
-
-                const albedo = clamp(0.76 + craters * 0.14 - maria * 0.18, 0.52, 0.92);
-                const ambient = 0.45; // Increased base ambient for glowing star effect
-                const intensity = ambient + diffuse * albedo * 1.15;
-                
-                const moonIdx = clamp(
-                  Math.floor(intensity * (MOON_CHARS.length - 1)),
-                  0,
-                  MOON_CHARS.length - 1
-                );
-                char = MOON_CHARS[moonIdx];
-                opacity = clamp(0.15 + intensity * 0.85, 0.15, 1.0);
-
-                // Left 55% of width transitions to warm orange, keeping rest cool cyan/white
-                if (localX < 0.10) {
-                  const rVal = Math.round(180 + (240 - 180) * colorProgress);
-                  const gVal = Math.round(235 + (110 - 235) * colorProgress);
-                  const bVal = Math.round(255 + (32 - 255) * colorProgress);
-                  ctx.fillStyle = `rgba(${rVal}, ${gVal}, ${bVal}, ${opacity})`;
-                } else {
-                  ctx.fillStyle = `rgba(180, 235, 255, ${opacity})`;
-                }
+                ctx.fillStyle = `rgba(${primaryR}, ${primaryG}, ${primaryB}, ${primaryOpacity})`;
+                ctx.fillText(primaryChar, drawPrimaryX, drawPrimaryY);
               }
+            }
 
-              ctx.fillText(char, drawX, drawY);
+            // --- Streaming Background (Hero-like Flow Field) ---
+            if (bh > 0.001) {
+              const sampleX = c * 0.085 - time * (1.8 + laneSpeed * 1.6);
+              const sampleY = r * 0.11 + Math.sin(c * 0.025 + time * 1.2) * 0.6;
 
-            } else {
-              // --- CELL SCRAMBLES & FADES OUT (Sky/Cypress cells) ---
-              if (t < 0.99) {
-                const scrambleX = Math.sin(r * 0.4 + time * 1.5) * (width * 0.16) * elasticFactor;
-                const scrambleY = Math.cos(c * 0.4 + time * 1.2) * (height * 0.16) * elasticFactor;
+              const flowA = noise2D(sampleX, sampleY);
+              const flowB = noise2D(sampleX * 1.7 + 20, sampleY * 0.8 - 14);
+              const wave = Math.sin(sampleX * 1.9 + laneNorm * 14) * 0.5 + Math.cos(sampleY * 2.4 - time * 2.1) * 0.5;
 
-                const drawX = x + scrambleX;
-                const drawY = y + scrambleY;
+              let density = flowA * 0.42 + flowB * 0.28 + (wave * 0.5 + 0.5) * 0.3;
 
-                const charSeed = noise2D(nx * 12, ny * 12);
-                const char = charSeed > 0.5 ? '1' : '0';
-                
-                // Fade out as transition t reaches 1.0
-                const opacity = starryOpacity * (1 - t);
+              // Base dust coordinate travelling horizontally
+              const dustX = x + (laneSpeed * 8 + flowB * 16) % (cellW * 3);
+              const dustY = rowY + Math.sin(sampleX * 2.2 + time + laneNorm * 8) * 1.8;
+              
+              const dxDust = dustX - centerX;
+              const dyDust = dustY - centerY;
+              const distDust = Math.hypot(dxDust, dyDust);
+              const normDust = distDust / bhRadius;
 
-                if (opacity > 0.02) {
-                  ctx.fillStyle = `${starryColor}, ${opacity})`;
-                  ctx.fillText(char, drawX, drawY);
-                }
-              }
+              if (density > 0.38 && normDust >= 0.92) {
+                const fieldIdx = clamp(Math.floor(density * (FIELD_CHARS.length - 1)), 0, FIELD_CHARS.length - 1);
+                const streamChar = FIELD_CHARS[fieldIdx];
 
-              // --- FADE IN STREAMING CORONA SPACE DUST (once star starts forming) ---
-              if (bgProgress > 0.01) {
-                const sampleX =
-                  c * 0.085 -
-                  time * (1.8 + laneSpeed * 1.6);
-                const sampleY =
-                  r * 0.11 +
-                  Math.sin(c * 0.025 + time * 1.2) * 0.6;
+                // Gravitational lensing (push outward near horizon)
+                const lensFactor = 1.0 + (0.30 / (normDust * normDust + 0.15)) * bh;
+                const lensedDist = distDust * lensFactor;
+                const angleDust = Math.atan2(dyDust, dxDust);
 
-                const flowA = noise2D(sampleX, sampleY);
-                const flowB = noise2D(sampleX * 1.7 + 20, sampleY * 0.8 - 14);
-                const wave =
-                  Math.sin(sampleX * 1.9 + laneNorm * 14) * 0.5 +
-                  Math.cos(sampleY * 2.4 - time * 2.1) * 0.5;
+                // Swirl angle deflection: spiral rotation around center
+                const swirlFactor = (1.2 * bh) / (normDust * normDust + 0.3);
+                const finalAngle = angleDust + swirlFactor;
 
-                let density = flowA * 0.42 + flowB * 0.28 + (wave * 0.5 + 0.5) * 0.3;
+                let drawDustX = centerX + Math.cos(finalAngle) * lensedDist;
+                let drawDustY = centerY + Math.sin(finalAngle) * lensedDist;
 
-                // Corona illumination outside star
-                const illumination = Math.exp(-Math.pow((normDistCurrent - 1.0) * 1.8, 2)) * colorProgress;
-                density += illumination * 0.22;
+                const streamOpacityFinal = (0.012 + density * 0.08) * bh;
 
-                const bgThreshold = 0.75 - 0.17 * bgProgress;
+                if (streamOpacityFinal > 0.02) {
+                  // Dust color is white/gray far away, transitioning to glowing orange near event horizon
+                  let rStream = 232;
+                  let gStream = 230;
+                  let bStream = 224;
 
-                if (density > bgThreshold) {
-                  const fieldIdx = clamp(
-                    Math.floor(density * (FIELD_CHARS.length - 1)),
-                    0,
-                    FIELD_CHARS.length - 1
-                  );
-                  const char = FIELD_CHARS[fieldIdx];
-                  const opacity = (0.012 + density * 0.08) * bgProgress;
-
-                  let drawX = x;
-                  let drawY = y;
-
-                  // Streaming horizontal travel
-                  drawX += (laneSpeed * 8 + flowB * 16) % (cellW * 3);
-                  drawY += Math.sin(sampleX * 2.2 + time + laneNorm * 8) * 1.8;
-
-                  // Swirl flow
-                  if (t > 0.1 && sphereScale > 0.1) {
-                    const angle = Math.atan2(dyCurrent, dxCurrent);
-                    const orbitBand = Math.exp(-Math.pow((distCurrent / radiusForCalc - 1.15) * 6, 2));
-                    const swirl = orbitBand * 10;
-                    drawX += -Math.sin(angle) * swirl;
-                    drawY += Math.cos(angle) * swirl * 0.6;
+                  if (normDust < 1.8) {
+                    const orangeFactor = clamp((1.8 - normDust) / 0.95, 0, 1);
+                    rStream = Math.round(232 + (255 - 232) * orangeFactor);
+                    gStream = Math.round(230 + (80 - 230) * orangeFactor);
+                    bStream = Math.round(224 + (0 - 224) * orangeFactor);
                   }
 
-                  // Interpolate dust color based on star corona illumination
-                  const rVal = Math.round(180 + (245 - 180) * illumination);
-                  const gVal = Math.round(210 + (110 - 210) * illumination);
-                  const bVal = Math.round(230 + (32 - 230) * illumination);
-                  
-                  ctx.fillStyle = `rgba(${rVal}, ${gVal}, ${bVal}, ${opacity})`;
-                  ctx.fillText(char, drawX, drawY);
+                  ctx.fillStyle = `rgba(${rStream}, ${gStream}, ${bStream}, ${streamOpacityFinal})`;
+                  ctx.fillText(streamChar, drawDustX, drawDustY);
                 }
               }
             }
           }
+        }
+
+        // Pass 2: Draw all ring characters using a smaller, high-density font setting
+        if (ringCharsList.length > 0) {
+          ctx.font = `${cellH * (0.84 - 0.46 * bh)}px "Fragment Mono", monospace`;
+          for (let i = 0; i < ringCharsList.length; i++) {
+            const rc = ringCharsList[i];
+            if (rc.opacity > 0.02) {
+              ctx.fillStyle = `rgba(${rc.r}, ${rc.g}, ${rc.b}, ${rc.opacity})`;
+              ctx.fillText(rc.char, rc.x, rc.y);
+            }
+          }
+          // Restore font size to original setting
+          ctx.font = `${cellH * 0.84}px "Fragment Mono", monospace`;
         }
       };
 
@@ -423,6 +499,23 @@ const AsciiBirthCanvas = forwardRef<AsciiBirthCanvasRef, AsciiBirthCanvasProps>(
         resize();
         renderSingleFrame();
       });
+
+      (window as any).debugCanvas = {
+        getLoopState: () => isLooping.current,
+        getParams: () => {
+          const state = animStateRef.current;
+          return state ? {
+            bgProgress: state.bgProgress,
+            sphereProgress: state.sphereProgress,
+            blackHoleProgress: state.blackHoleProgress,
+            sphereX: state.sphereX,
+            sphereY: state.sphereY,
+          } : null;
+        },
+        forceRender: () => {
+          renderSingleFrame();
+        }
+      };
 
       window.addEventListener('resize', resize);
 
