@@ -7,7 +7,7 @@ import { siteConfig } from './config';
 import Hero from './sections/Hero';
 import Manifesto from './sections/Manifesto';
 import Facilities from './sections/Facilities';
-import Archives from './sections/Archives';
+// import Archives from './sections/Archives';
 import PainPoints from './sections/PainPoints';
 import CTA from './sections/CTA';
 import Footer from './sections/Footer';
@@ -51,7 +51,7 @@ function Home() {
       <main>
         <Hero />
         <Manifesto />
-        <Archives />
+        {/* <Archives /> */}
         <PainPoints />
         <Facilities />
         <CTA />

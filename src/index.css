@@ -474,6 +474,9 @@
   .mobile-menu-btn {
     display: block !important;
   }
+  .hero-nav-links {
+    display: none !important;
+  }
 }
 
 .mobile-drawer-link {
